@@ -40,10 +40,11 @@ read-only, and the proxy. See [Backends](docs/backends.md) for how they differ.
 
 > [!NOTE]
 > Tested on WSL 2 (3.0.5, kernel 6.18, Ubuntu 24.04, mirrored networking): `./agybox doctor` passes all its checks
-> with `bwrap` and `apptainer`, in the `proxy` and `none` networks, and agy 1.5.9 starts and reaches its sign-in.
+> with `bwrap`, `apptainer` and `docker` (Docker Desktop 29.6 with WSL integration), in the `proxy` and `none`
+> networks, and agy 1.5.9 starts and reaches its sign-in on each.
 >
-> Not yet tested: **the `docker` backend has not been run**, and **a full session after sign-in has not been run**, so
-> the allow list may be missing a host agy needs once signed in. If agy fails after sign-in, run `./agybox hosts` to
+> Not yet tested: **a full session after sign-in has not been run**, so the allow list may be missing a host agy needs
+> once signed in. If agy fails after sign-in, run `./agybox hosts` to
 > see what the proxy refused. Run `./agybox doctor` before you rely on any backend.
 
 ## Requirements

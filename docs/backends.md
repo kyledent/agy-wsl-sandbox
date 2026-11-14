@@ -76,11 +76,9 @@ image. `./agybox` runs it as your own user ID, so files it writes in the workspa
 installed in WSL itself. Your user needs to be in the `docker` group. `./agybox setup` builds `agybox:latest`, and
 rebuilds it when the `Dockerfile` or `packages.sh` changes.
 
-> [!WARNING]
-> The docker backend has not been run yet. In particular, `--network none` relies on the proxy's unix socket working
-> when mounted into the container. With docker-ce in WSL, that is the same kernel and it should. With Docker Desktop,
-> whose engine runs in its own WSL distro, `./agybox doctor` will tell. If "it can reach agy's sign-in service through
-> the proxy" fails there, please report it.
+`--network none` relies on the proxy's unix socket working when mounted into the container. It does with Docker
+Desktop, whose engine runs in its own WSL distro but on the same kernel, and `./agybox doctor` checks it: "it can reach
+agy's sign-in service through the proxy". docker-ce installed in WSL itself has not been tried.
 
 Anyone who can run `docker` can start a privileged container, so membership of the `docker` group is equivalent to root
 in WSL. That is about who runs `./agybox`, not about the agent: it cannot reach the Docker socket from inside.
@@ -94,7 +92,7 @@ in WSL. That is about who runs `./agybox`, not about the agent: it cannot reach 
 | Start-up | Fastest | Fast | Slower: a container per run |
 | Memory, CPU and process limits | Through systemd | Through systemd | Docker's own |
 | Root filesystem | Your `/usr` and `/etc`, read-only | The image, with a writable tmpfs | The image, read-only |
-| Tested | Yes | Yes | Not yet |
+| Tested | Yes | Yes | Yes, with Docker Desktop |
 
 All three share one Linux kernel with WSL and Windows' WSL VM. None of them is a virtual machine: a kernel bug could
 break any of them. See [Hardening](hardening.md#stronger-boundaries) for a stronger boundary.
