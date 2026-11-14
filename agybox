@@ -1,0 +1,573 @@
+#!/usr/bin/env bash
+# Run Google's Antigravity CLI (agy) in a sandbox on WSL Ubuntu: bubblewrap, Docker or Apptainer, with an allow-list
+# proxy as its only way out to the network.
+#
+#   ./agybox           set up if needed, then open agy in the sandbox
+#   ./agybox doctor    prove that the sandbox allows and refuses what it should
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+STATE="$ROOT/.state"
+RUNTIME="$ROOT/.runtime"
+AGENT_HOME="$STATE/home"
+PROXY_LOG="$STATE/proxy.log"
+AGY_DIR="$RUNTIME/agy"
+SIF="$RUNTIME/agybox.sif"
+IMAGE=agybox:latest
+
+# Where agy's own installer looks for releases. Each platform's manifest names the latest build and its SHA-512.
+MANIFEST_BASE=https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests
+
+# The proxy's port inside the sandbox, on the sandbox's own loopback
+PROXY_PORT=3128
+
+die() { echo "agybox: $*" >&2; exit 1; }
+note() { echo "agybox: $*" >&2; }
+
+# .env, as "docker compose" reads it: literal values, and the shell's environment wins
+load_env() {
+    local line key val
+    [ -f "$ROOT/.env" ] || { cp "$ROOT/.env.example" "$ROOT/.env"; note "created .env from .env.example"; }
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=${line%$'\r'}
+        case "$line" in ''|\#*) continue ;; esac
+        key=${line%%=*}; val=${line#*=}
+        case "$key" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+        if [ -z "${!key+x}" ]; then export "$key=$val"; fi
+    done < "$ROOT/.env"
+}
+
+# A relative path in .env is relative to this folder
+abs_path() {
+    case "$1" in /*) echo "$1" ;; *) echo "$ROOT/${1#./}" ;; esac
+}
+
+load_config() {
+    load_env
+    BACKEND="${AGYBOX_BACKEND:-bwrap}"
+    case "$BACKEND" in bwrap|docker|apptainer) ;; *) die "AGYBOX_BACKEND must be bwrap, docker or apptainer, not $BACKEND" ;; esac
+    NETWORK="${AGYBOX_NETWORK:-proxy}"
+    case "$NETWORK" in proxy|learn|none|open) ;; *) die "AGYBOX_NETWORK must be proxy, learn, none or open, not $NETWORK" ;; esac
+    WORKSPACE=$(abs_path "${WORKSPACE_DIR:-./workspace}")
+    mkdir -p "$WORKSPACE"
+    WORKSPACE=$(cd "$WORKSPACE" && pwd -P)
+    # A workspace that holds this folder, or your home, would hand the agent its own sign-in token, .env and
+    # everything else in there
+    case "$ROOT/" in "$WORKSPACE"/*) die "WORKSPACE_DIR ($WORKSPACE) contains this folder; point it at one project" ;; esac
+    case "$HOME/" in "$WORKSPACE"/*) die "WORKSPACE_DIR ($WORKSPACE) contains your home; point it at one project" ;; esac
+    [ "$WORKSPACE" != "$HOME" ] || die "WORKSPACE_DIR is your home; point it at one project"
+    case "$ROOT" in /mnt/[a-z]/*) note "this folder is on a Windows drive ($ROOT). Clone it into WSL's own filesystem instead, such as ~/agy-wsl-sandbox: the sandbox's home needs Linux permissions" ;; esac
+    PASS_ENV="${AGYBOX_PASS_ENV-GH_TOKEN}"
+}
+
+# --- agy itself ------------------------------------------------------------------------------------------------------
+
+agy_platform() {
+    case "$(uname -m)" in
+        x86_64|amd64) echo linux_amd64 ;;
+        aarch64|arm64) echo linux_arm64 ;;
+        *) die "agy has no build for $(uname -m)" ;;
+    esac
+}
+
+agy_installed() { [ -x "$AGY_DIR/current/agy" ]; }
+agy_version() { readlink "$AGY_DIR/current" 2>/dev/null || echo none; }
+
+# Downloads the latest agy into .runtime/agy/VERSION, checks its SHA-512 against the manifest, and points
+# .runtime/agy/current at it. Keeps the previous version, for going back, and removes older ones.
+install_agy() {
+    local manifest version url sha tmp got previous
+    manifest=$(curl -fsSL --retry 3 "$MANIFEST_BASE/$(agy_platform).json") || die "could not fetch agy's release manifest"
+    read -r version url sha < <(python3 -c '
+import json, sys
+m = json.load(sys.stdin)
+print(m["version"], m["url"], m["sha512"])' <<<"$manifest") || die "agy's release manifest is not what was expected"
+    case "$version" in ''|*[!0-9A-Za-z._-]*) die "unexpected agy version in the manifest: $version" ;; esac
+    previous=$(agy_version)
+    if [ -x "$AGY_DIR/$version/agy" ]; then
+        ln -sfn "$version" "$AGY_DIR/current"
+        echo "agy $version is installed"
+        return 0
+    fi
+    echo "Downloading agy $version"
+    tmp="$AGY_DIR/.download"
+    rm -rf "$tmp"; mkdir -p "$tmp"
+    curl -fL --retry 3 -o "$tmp/payload" "$url"
+    got=$(sha512sum "$tmp/payload" | cut -d ' ' -f 1)
+    [ "$got" = "$sha" ] || { rm -rf "$tmp"; die "checksum mismatch for agy $version: expected $sha, got $got"; }
+    case "$url" in
+        *.tar.gz*) tar -xzf "$tmp/payload" -C "$tmp" antigravity && mv "$tmp/antigravity" "$tmp/agy" ;;
+        *) mv "$tmp/payload" "$tmp/agy" ;;
+    esac
+    chmod 0555 "$tmp/agy"
+    rm -f "$tmp/payload"
+    mv "$tmp" "$AGY_DIR/$version"
+    ln -sfn "$version" "$AGY_DIR/current"
+    echo "Installed agy $version (SHA-512 checked)"
+    # Keep this version and the one before it
+    local d
+    for d in "$AGY_DIR"/*/; do
+        d=$(basename "$d")
+        [ ! -L "$AGY_DIR/$d" ] || continue   # current
+        if [ "$d" != "$version" ] && [ "$d" != "$previous" ]; then rm -rf "${AGY_DIR:?}/$d"; fi
+    done
+}
+
+# --- Backends: setup -------------------------------------------------------------------------------------------------
+
+# bubblewrap from the system, or else from Ubuntu's archive into .runtime, which needs no root: apt checks the
+# package against its signed index, and bwrap works unprivileged with user namespaces
+find_bwrap() {
+    if [ -x "$RUNTIME/bwrap/usr/bin/bwrap" ]; then BWRAP="$RUNTIME/bwrap/usr/bin/bwrap"
+    elif BWRAP=$(command -v bwrap); then :
+    else return 1; fi
+}
+
+bwrap_disables_userns() {
+    if [ -z "${BWRAP_USERNS:-}" ]; then
+        if "$BWRAP" --help 2>&1 | grep -q -- --disable-userns; then BWRAP_USERNS=yes; else BWRAP_USERNS=no; fi
+    fi
+    [ "$BWRAP_USERNS" = yes ]
+}
+
+setup_bwrap() {
+    find_bwrap && return 0
+    command -v apt-get >/dev/null || die "bubblewrap not found: install it with your package manager"
+    echo "Fetching bubblewrap from Ubuntu's archive (no root needed; or: sudo apt install bubblewrap)"
+    local tmp="$RUNTIME/.bwrap-download"
+    rm -rf "$tmp"; mkdir -p "$tmp"
+    ( cd "$tmp" && apt-get download bubblewrap >/dev/null ) || die "apt-get download bubblewrap failed; try: sudo apt install bubblewrap"
+    rm -rf "$RUNTIME/bwrap"
+    dpkg-deb -x "$tmp"/bubblewrap_*.deb "$RUNTIME/bwrap"
+    rm -rf "$tmp"
+    find_bwrap || die "no bwrap in the bubblewrap package"
+}
+
+# A hash of the image's recipe, so that a change to it rebuilds the image
+recipe_hash() { cat "$ROOT/container/packages.sh" "$ROOT/container/$1" | sha256sum | cut -c1-16; }
+
+setup_docker() {
+    command -v docker >/dev/null || die "docker not found. With Docker Desktop: Settings → Resources → WSL integration → enable this distro"
+    docker info >/dev/null 2>&1 || die "docker is installed but not running, or this user cannot use it"
+    local want have
+    want=$(recipe_hash Dockerfile)
+    have=$(docker image inspect -f '{{index .Config.Labels "agybox.recipe"}}' "$IMAGE" 2>/dev/null || true)
+    [ "$want" = "$have" ] && return 0
+    echo "Building the $IMAGE image"
+    docker build --label "agybox.recipe=$want" -t "$IMAGE" -f "$ROOT/container/Dockerfile" "$ROOT/container"
+}
+
+setup_apptainer() {
+    command -v apptainer >/dev/null || die "apptainer not found: see docs/backends.md#apptainer"
+    local want
+    want=$(recipe_hash agybox.def)
+    [ -f "$SIF" ] && [ "$(cat "$SIF.recipe" 2>/dev/null)" = "$want" ] && return 0
+    echo "Building $SIF"
+    rm -f "$SIF.tmp"
+    # WSL cannot mount binfmt_misc for fakeroot's helper, so fall back to the root-mapped user namespace alone
+    ( cd "$ROOT/container" && { apptainer build --fakeroot "$SIF.tmp" agybox.def \
+        || apptainer build --fakeroot --ignore-subuid "$SIF.tmp" agybox.def; } ) \
+        || die "apptainer could not build the image; see docs/troubleshooting.md"
+    mv "$SIF.tmp" "$SIF"
+    echo "$want" > "$SIF.recipe"
+}
+
+cmd_setup() {
+    local tool
+    [ "$(uname -s)" = Linux ] || die "this runs in WSL Ubuntu, or on Linux"
+    for tool in curl tar sha512sum python3; do
+        command -v "$tool" >/dev/null || die "$tool not found (sudo apt install $tool)"
+    done
+    mkdir -p "$STATE" "$RUNTIME" "$AGENT_HOME" "$AGY_DIR"
+    agy_installed || install_agy
+    "setup_$BACKEND"
+    if [ ! -f "$ROOT/allow/local.txt" ]; then cp "$ROOT/allow/local.txt.example" "$ROOT/allow/local.txt"; fi
+}
+
+require_setup() {
+    if ! agy_installed; then cmd_setup; return; fi
+    case "$BACKEND" in
+        bwrap) find_bwrap || setup_bwrap ;;
+        *) "setup_$BACKEND" ;;
+    esac
+    mkdir -p "$AGENT_HOME"
+    if [ ! -f "$ROOT/allow/local.txt" ]; then cp "$ROOT/allow/local.txt.example" "$ROOT/allow/local.txt"; fi
+}
+
+# --- The proxy -------------------------------------------------------------------------------------------------------
+
+# One proxy per run of ./agybox, on a unix socket in a folder of its own, which the sandbox gets read-only
+start_proxy() {
+    local d
+    # Folders of runs that were killed before they could clean up
+    for d in "$STATE"/run/*/; do
+        [ -d "$d" ] || continue
+        kill -0 "$(basename "$d")" 2>/dev/null || rm -rf "$d"
+    done
+    SESSION="$STATE/run/$$"
+    rm -rf "$SESSION"; mkdir -p "$SESSION"; chmod 700 "$SESSION"
+    case "$NETWORK" in proxy|learn) ;; *) return 0 ;; esac
+    local args=(--listen "unix:$SESSION/proxy.sock" --allow "$ROOT/allow/hosts.txt" --allow "$ROOT/allow/local.txt"
+        --log "$PROXY_LOG")
+    if [ "$NETWORK" = learn ]; then args+=(--any-public); fi
+    python3 "$ROOT/lib/proxy.py" "${args[@]}" </dev/null &
+    PROXY_PID=$!
+    local n=0
+    until [ -S "$SESSION/proxy.sock" ]; do
+        kill -0 "$PROXY_PID" 2>/dev/null || die "the proxy did not start; see $PROXY_LOG"
+        [ "$n" -lt 50 ] || die "the proxy did not start within 5 s"
+        sleep 0.1; n=$(( n + 1 ))
+    done
+}
+
+stop_proxy() {
+    if [ -n "${PROXY_PID:-}" ]; then kill "$PROXY_PID" 2>/dev/null || true; wait "$PROXY_PID" 2>/dev/null || true; fi
+    if [ -n "${SESSION:-}" ]; then rm -rf "$SESSION"; fi
+    PROXY_PID=""
+}
+
+# --- The sandbox -----------------------------------------------------------------------------------------------------
+
+# The environment inside: nothing of the calling shell's except what is listed here and in AGYBOX_PASS_ENV
+sandbox_env() {
+    local var
+    BOX_ENV=("HOME=/home/agent" "USER=agent" "LOGNAME=agent" "TERM=${TERM:-xterm-256color}" "LANG=${LANG:-C.UTF-8}"
+        "AGYBOX=1" "AGYBOX_BACKEND=$BACKEND" "AGYBOX_NETWORK=$NETWORK")
+    case "$NETWORK" in
+        proxy|learn)
+            for var in HTTPS_PROXY HTTP_PROXY https_proxy http_proxy; do BOX_ENV+=("$var=http://127.0.0.1:$PROXY_PORT"); done
+            BOX_ENV+=("NO_PROXY=localhost,127.0.0.1,::1" "no_proxy=localhost,127.0.0.1,::1") ;;
+    esac
+    for var in TZ COLORTERM TERM_PROGRAM ${PASS_ENV//,/ }; do
+        case "$var" in *[!A-Za-z0-9_]*|'') die "bad variable name in AGYBOX_PASS_ENV: $var" ;; esac
+        if [ -n "${!var:-}" ]; then
+            case "${!var}" in *$'\n'*) die "$var holds a newline, which the sandbox's environment cannot carry" ;; esac
+            BOX_ENV+=("$var=${!var}")
+        fi
+    done
+}
+
+# Prefix for CPU, memory and process limits: a transient systemd scope, for bwrap and apptainer
+limit_prefix() {
+    LIMIT=()
+    [ -n "${AGYBOX_MEMORY:-}${AGYBOX_CPUS:-}${AGYBOX_PIDS:-}" ] || return 0
+    command -v systemd-run >/dev/null || die "AGYBOX_MEMORY, AGYBOX_CPUS and AGYBOX_PIDS need systemd (systemd=true in /etc/wsl.conf)"
+    LIMIT=(systemd-run --user --scope --quiet --collect)
+    # OOMPolicy=continue: the process that runs out is killed, not the whole session
+    if [ -n "${AGYBOX_MEMORY:-}" ]; then LIMIT+=(-p "MemoryMax=$AGYBOX_MEMORY" -p MemorySwapMax=0 -p OOMPolicy=continue); fi
+    if [ -n "${AGYBOX_CPUS:-}" ]; then LIMIT+=(-p "CPUQuota=$(awk -v c="$AGYBOX_CPUS" 'BEGIN { printf "%d%%", c * 100 }')"); fi
+    if [ -n "${AGYBOX_PIDS:-}" ]; then LIMIT+=(-p "TasksMax=$AGYBOX_PIDS"); fi
+    LIMIT+=(--)
+}
+
+# Mounts, the same in every backend:
+#   /home/agent   .state/home, read-write: agy's settings, sign-in and conversations
+#   WORKSPACE     the workspace, read-write, at the same path as outside
+#   /opt/agy      agy's binary, read-only
+#   /opt/agybox   lib/: the entry script and the relay, read-only
+#   /run/agybox   this run's proxy socket, read-only, with the proxy network only
+sandbox_cmd_bwrap() {
+    local kv d
+    SANDBOX=("${LIMIT[@]}" "$BWRAP" --unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try
+        --die-with-parent --hostname agybox --cap-drop ALL --clearenv)
+    # No further user namespaces inside, which are a common way into kernel bugs. bwrap 0.8 and newer.
+    if bwrap_disables_userns; then SANDBOX+=(--disable-userns); fi
+    if [ "$NETWORK" = open ]; then SANDBOX+=(--share-net); else SANDBOX+=(--unshare-net); fi
+    # The system's programs and libraries. Ubuntu keeps /bin, /lib and /sbin in /usr.
+    SANDBOX+=(--ro-bind /usr /usr)
+    for d in bin sbin lib lib32 lib64 libx32; do
+        if [ -L "/$d" ]; then SANDBOX+=(--symlink "$(readlink "/$d")" "/$d")
+        elif [ -d "/$d" ]; then SANDBOX+=(--ro-bind "/$d" "/$d"); fi
+    done
+    # /etc for users, certificates and tool settings. Its secrets (shadow, ssh host keys) are unreadable anyway.
+    SANDBOX+=(--ro-bind /etc /etc --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run --tmpfs /var/tmp --dir /var
+        --bind "$AGENT_HOME" /home/agent --bind "$WORKSPACE" "$WORKSPACE"
+        --ro-bind "$(readlink -f "$AGY_DIR/current")" /opt/agy --ro-bind "$ROOT/lib" /opt/agybox)
+    if [ -S "${SESSION:-}/proxy.sock" ]; then SANDBOX+=(--ro-bind "$SESSION" /run/agybox); fi
+    for kv in "${BOX_ENV[@]}"; do SANDBOX+=(--setenv "${kv%%=*}" "${kv#*=}"); done
+    SANDBOX+=(--chdir "$WORKSPACE" --)
+}
+
+sandbox_cmd_docker() {
+    local kv
+    # Values go in a file, not on the command line, where ps would show them
+    ( umask 077; : > "$SESSION/env"; for kv in "${BOX_ENV[@]}"; do printf '%s\n' "$kv" >> "$SESSION/env"; done )
+    SANDBOX=(docker run --rm -i --init --name "agybox-$$-$RANDOM" --hostname agybox --user "$(id -u):$(id -g)"
+        --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:exec,mode=1777 --tmpfs /var/tmp:mode=1777
+        --env-file "$SESSION/env"
+        -v "$AGENT_HOME:/home/agent" -v "$WORKSPACE:$WORKSPACE"
+        -v "$(readlink -f "$AGY_DIR/current"):/opt/agy:ro" -v "$ROOT/lib:/opt/agybox:ro" -w "$WORKSPACE"
+        --pids-limit "${AGYBOX_PIDS:-4096}")
+    if [ -t 0 ] && [ -t 1 ]; then SANDBOX+=(-t); fi
+    if [ "$NETWORK" != open ]; then SANDBOX+=(--network none); fi
+    if [ -S "$SESSION/proxy.sock" ]; then SANDBOX+=(-v "$SESSION:/run/agybox:ro"); fi
+    if [ -n "${AGYBOX_MEMORY:-}" ]; then SANDBOX+=(--memory "$AGYBOX_MEMORY" --memory-swap "$AGYBOX_MEMORY"); fi
+    if [ -n "${AGYBOX_CPUS:-}" ]; then SANDBOX+=(--cpus "$AGYBOX_CPUS"); fi
+    SANDBOX+=("$IMAGE")
+}
+
+sandbox_cmd_apptainer() {
+    local kv
+    # APPTAINERENV_ variables reach the container despite --cleanenv; HOME comes from --home instead
+    SANDBOX=("${LIMIT[@]}" env -i "PATH=/usr/local/bin:/usr/bin:/bin" "HOME=$HOME")
+    for kv in "${BOX_ENV[@]}"; do
+        case "$kv" in HOME=*) continue ;; esac
+        SANDBOX+=("APPTAINERENV_$kv")
+    done
+    SANDBOX+=(apptainer --quiet exec --containall --no-mount hostfs,cwd --writable-tmpfs --no-privs --hostname agybox
+        --home "$AGENT_HOME:/home/agent" -B "$WORKSPACE:$WORKSPACE"
+        -B "$(readlink -f "$AGY_DIR/current"):/opt/agy:ro" -B "$ROOT/lib:/opt/agybox:ro" --pwd "$WORKSPACE")
+    if [ "$NETWORK" != open ]; then SANDBOX+=(--net --network none); fi
+    if [ -S "$SESSION/proxy.sock" ]; then SANDBOX+=(-B "$SESSION:/run/agybox:ro"); fi
+    SANDBOX+=("$SIF")
+}
+
+# box CMD...: run a program in the sandbox, in the workspace. The proxy must be running.
+box() {
+    sandbox_env
+    limit_prefix
+    "sandbox_cmd_$BACKEND"
+    "${SANDBOX[@]}" /bin/sh /opt/agybox/inside.sh "$@"
+}
+
+# box_session CMD...: start the proxy, run, stop the proxy, and return the program's status
+box_session() {
+    local rc=0
+    trap stop_proxy EXIT
+    trap 'exit 130' INT TERM
+    start_proxy
+    box "$@" || rc=$?
+    stop_proxy
+    trap - EXIT INT TERM
+    return "$rc"
+}
+
+# agy's tool execution policy from AGY_TOOL_EXECUTION_POLICY, applied at every start; empty leaves it alone
+apply_agy_settings() {
+    local policy="${AGY_TOOL_EXECUTION_POLICY:-}"
+    [ -n "$policy" ] || return 0
+    case "$policy" in
+        always-proceed|request-review|proceed-in-sandbox|strict) ;;
+        *) note "ignoring AGY_TOOL_EXECUTION_POLICY=$policy (use always-proceed, request-review, proceed-in-sandbox or strict)"; return 0 ;;
+    esac
+    python3 - "$AGENT_HOME/.gemini/antigravity-cli/settings.json" "$policy" <<'EOF'
+import json, os, sys
+path, policy = sys.argv[1], sys.argv[2]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+try:
+    with open(path) as f:
+        settings = json.load(f)
+except (FileNotFoundError, ValueError):
+    settings = {}
+settings["toolExecutionPolicy"] = policy
+with open(path + ".tmp", "w") as f:
+    json.dump(settings, f, indent=2)
+os.replace(path + ".tmp", path)
+EOF
+}
+
+# --- Commands --------------------------------------------------------------------------------------------------------
+
+cmd_agy() {
+    require_setup
+    apply_agy_settings
+    if [ "$NETWORK" = open ]; then
+        note "network: open. agy can reach the internet, your LAN, any VPN and, in WSL's mirrored mode, Windows' localhost"
+    fi
+    box_session /opt/agy/agy "$@"
+}
+
+cmd_update() {
+    mkdir -p "$AGY_DIR"
+    local before; before=$(agy_version)
+    install_agy
+    if [ "$before" != "$(agy_version)" ] && [ "$before" != none ]; then
+        echo "Updated from $before. To go back: ln -sfn $before $AGY_DIR/current"
+    fi
+}
+
+cmd_status() {
+    echo "backend:   $BACKEND"
+    echo "network:   $NETWORK"
+    echo "agy:       $(agy_version)"
+    echo "workspace: $WORKSPACE"
+    echo "home:      $AGENT_HOME"
+    case "$BACKEND" in
+        bwrap) if find_bwrap; then echo "bwrap:     $BWRAP ($("$BWRAP" --version))"; else echo "bwrap:     not found"; fi ;;
+        docker) docker image inspect -f 'image:     {{.Id}} ({{.Created}})' "$IMAGE" 2>/dev/null || echo "image:     not built" ;;
+        apptainer) if [ -f "$SIF" ]; then echo "image:     $SIF"; else echo "image:     not built"; fi ;;
+    esac
+    if [ -f "$AGENT_HOME/.gemini/antigravity-cli/settings.json" ]; then
+        echo "settings:  $AGENT_HOME/.gemini/antigravity-cli/settings.json"
+    fi
+}
+
+# The hosts that the proxy refused, most often first, to grow allow/local.txt from. "./agybox hosts all" lists
+# the allowed ones too: after a session with AGYBOX_NETWORK=learn, that is everything agy used.
+cmd_hosts() {
+    [ -s "$PROXY_LOG" ] || { echo "The proxy has not logged anything yet ($PROXY_LOG)"; return 0; }
+    local which="${1:-denied}"
+    awk -v which="$which" '
+        $2 == "DENY" || (which == "all" && $2 == "ALLOW") {
+            split($4, hp, ":"); key = $2 " " $4
+            n[key]++; last[key] = $1
+        }
+        END { for (k in n) { split(k, f, " "); printf "%6d  %-5s  %-45s  last %s\n", n[k], f[1], f[2], last[k] } }' \
+        "$PROXY_LOG" | sort -rn
+    echo
+    echo "To allow a host, add it to allow/local.txt. It applies at once, to running sessions too."
+}
+
+# --- Doctor ----------------------------------------------------------------------------------------------------------
+
+DOCTOR_FAILS=0
+expect_ok() {
+    local label=$1; shift
+    if "$@" >/dev/null 2>&1; then echo "  ok    $label"
+    else echo "  FAIL  $label"; DOCTOR_FAILS=$(( DOCTOR_FAILS + 1 )); fi
+}
+expect_refused() {
+    local label=$1; shift
+    if "$@" >/dev/null 2>&1; then echo "  FAIL  $label (it was allowed)"; DOCTOR_FAILS=$(( DOCTOR_FAILS + 1 ))
+    else echo "  ok    $label"; fi
+}
+# box_sh SCRIPT: a shell command in the sandbox, without a terminal
+box_sh() { box /bin/sh -c "$1" </dev/null; }
+
+# Writing a file in your home: bwrap makes the workspace's parent folders on its own tmpfs, so a write there can
+# succeed inside, harmlessly. What counts is whether the file appears outside.
+wrote_home() {
+    box_sh "touch '$1'" || true
+    [ -e "$1" ]
+}
+
+# A Windows program copied into the workspace must not run: WSL's interop would start it outside any sandbox
+windows_exe_runs() {
+    local out
+    out=$(box_sh "./.agybox-doctor.exe /c echo AGYBOX-ESCAPED" 2>&1 || true)
+    case "$out" in *AGYBOX-ESCAPED*) return 0 ;; *) return 1 ;; esac
+}
+
+cmd_doctor() {
+    require_setup
+    local canary="$HOME/.agybox-doctor-canary" denied="$HOME/.agybox-doctor-denied"
+    local state_canary="$STATE/doctor-canary" probe="$WORKSPACE/.agybox-doctor"
+    local exe="$WORKSPACE/.agybox-doctor.exe" port
+    DOCTOR_LISTENER=""
+    echo secret > "$canary"; echo secret > "$state_canary"; rm -f "$denied"
+    # shellcheck disable=SC2064  # expand the paths now, the listener's pid later
+    trap "rm -f '$canary' '$state_canary' '$denied' '$probe' '$exe'; stop_proxy; [ -z \"\$DOCTOR_LISTENER\" ] || kill \$DOCTOR_LISTENER 2>/dev/null || true" EXIT
+    start_proxy
+
+    echo "Sandbox (backend: $BACKEND, network: $NETWORK)"
+    expect_ok "it can run a program at all" box /bin/true
+    expect_ok "agy runs ($(agy_version))" box /opt/agy/agy --version
+    expect_ok "git, python3 and curl are there" box_sh 'command -v git && command -v python3 && command -v curl'
+    expect_ok "it can write the workspace" box_sh "touch '$probe'"
+    expect_ok "it can write its home" box_sh 'touch "$HOME/.agybox-doctor" && rm "$HOME/.agybox-doctor"'
+
+    echo "Files"
+    expect_refused "it cannot read your home ($canary)" box_sh "cat '$canary'"
+    expect_refused "it cannot write your home" wrote_home "$denied"
+    expect_refused "it cannot read this folder's .state and .env" box_sh "cat '$state_canary' || cat '$ROOT/.env'"
+    expect_refused "it cannot change agy's binary" box_sh 'touch /opt/agy/agy'
+    expect_refused "it cannot change its entry script" box_sh 'touch /opt/agybox/inside.sh'
+    expect_refused "it cannot see the Windows drives" box_sh 'ls /mnt/c/Windows'
+
+    echo "Processes and services"
+    expect_refused "it cannot see the host's processes" box_sh 'grep -qx systemd /proc/1/comm'
+    if [ "$BACKEND" = bwrap ]; then
+        if bwrap_disables_userns; then
+            expect_refused "it cannot make user namespaces of its own" box_sh 'unshare --user true'
+        else
+            echo "  skip  user namespaces inside: this bwrap is older than 0.8. See docs/hardening.md"
+        fi
+    fi
+    expect_refused "it cannot reach WSL's interop socket" box_sh 'ls /run/WSL/ | grep -q interop'
+    expect_refused "it cannot reach your D-Bus session" box_sh "test -S /run/user/$(id -u)/bus"
+    if [ -f /mnt/c/Windows/System32/cmd.exe ]; then
+        cp /mnt/c/Windows/System32/cmd.exe "$exe"; chmod +x "$exe"
+        expect_refused "it cannot start a Windows program (cmd.exe in the workspace)" windows_exe_runs
+        rm -f "$exe"
+    else
+        echo "  skip  Windows program check: not WSL, or no cmd.exe"
+    fi
+    if [ "$(cat /proc/sys/dev/tty/legacy_tiocsti 2>/dev/null || echo 1)" = 0 ]; then
+        echo "  ok    it cannot type into your terminal (the kernel refuses TIOCSTI)"
+    else
+        echo "  FAIL  it may type into your terminal: dev.tty.legacy_tiocsti is not 0. See docs/hardening.md"
+        DOCTOR_FAILS=$(( DOCTOR_FAILS + 1 ))
+    fi
+
+    echo "Network ($NETWORK)"
+    # A service on this machine's loopback, as WSL's mirrored mode also shares Windows' loopback
+    port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
+    python3 -m http.server --bind 127.0.0.1 "$port" >/dev/null 2>&1 &
+    DOCTOR_LISTENER=$!
+    sleep 0.5
+    case "$NETWORK" in
+        proxy|learn)
+            expect_ok "it can reach agy's sign-in service through the proxy" \
+                box_sh 'code=$(curl -s -m 15 -o /dev/null -w "%{http_code}" https://oauth2.googleapis.com/); [ "$code" != 000 ] && [ "$code" != 403 ]'
+            if [ "$NETWORK" = proxy ]; then
+                expect_refused "the proxy refuses a host not on the allow list" box_sh 'curl -fsS -m 15 -o /dev/null https://example.com'
+            fi
+            expect_refused "it cannot connect around the proxy" box_sh 'curl -fsS --noproxy "*" -m 5 -o /dev/null https://142.250.80.46'
+            expect_refused "it cannot look up names (no DNS)" box_sh 'getent hosts example.com'
+            expect_refused "it cannot reach a service on this machine's loopback" \
+                box_sh "curl -fsS --noproxy '*' -m 5 -o /dev/null http://127.0.0.1:$port/"
+            expect_refused "the proxy refuses this machine's loopback" box_sh "curl -fsS -m 5 -o /dev/null http://127.0.0.1:$port/"
+            ;;
+        none)
+            expect_refused "it cannot reach the internet" box_sh 'curl -fsS --noproxy "*" -m 5 -o /dev/null https://142.250.80.46'
+            expect_refused "it cannot reach a service on this machine's loopback" \
+                box_sh "curl -fsS --noproxy '*' -m 5 -o /dev/null http://127.0.0.1:$port/"
+            ;;
+        open)
+            echo "  note  network: open. It can reach the internet, your LAN, any VPN and services on this machine"
+            ;;
+    esac
+
+    echo
+    if [ "$DOCTOR_FAILS" -gt 0 ]; then
+        echo "$DOCTOR_FAILS check(s) failed. See docs/troubleshooting.md"
+        return 1
+    fi
+    echo "All checks passed."
+}
+
+usage() {
+    cat <<'EOF'
+Usage: ./agybox [command]
+  agy       set up if needed, then open agy in the sandbox (the default); arguments go to agy
+  setup     download agy and set up the backend: bubblewrap, or the image for docker or apptainer
+  update    download the latest agy (the sandbox cannot update it itself)
+  shell     a shell in the sandbox, in the workspace
+  run       run a command in the sandbox: ./agybox run git status
+  doctor    check that the sandbox allows and refuses what it should
+  hosts     the hosts the proxy refused; "hosts all" adds the ones it allowed
+  status    the backend, network, agy version and folders in use
+Settings are in .env; see .env.example.
+EOF
+}
+
+command=${1:-agy}
+[ $# -eq 0 ] || shift
+case "$command" in
+    -h|--help|help) usage; exit 0 ;;
+    agy|setup|update|shell|run|doctor|hosts|status) ;;
+    -*) set -- "$command" "$@"; command=agy ;;   # ./agybox --continue: options for agy
+    *) usage >&2; exit 2 ;;
+esac
+
+load_config
+case "$command" in
+    agy)    cmd_agy "$@" ;;
+    setup)  cmd_setup ;;
+    update) cmd_update ;;
+    shell)  require_setup; box_session /bin/bash -l ;;
+    run)    [ $# -gt 0 ] || die "run: name a command"; require_setup; box_session "$@" ;;
+    doctor) cmd_doctor ;;
+    hosts)  cmd_hosts "$@" ;;
+    status) cmd_status ;;
+esac

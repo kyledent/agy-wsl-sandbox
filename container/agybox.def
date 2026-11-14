@@ -1,0 +1,11 @@
+# The image for AGYBOX_BACKEND=apptainer, built without root (--fakeroot). The same packages as the docker image.
+# agy and the entry script are bound read-only at run time. ./agybox rebuilds this when it or packages.sh changes.
+Bootstrap: docker
+From: ubuntu:24.04
+
+%files
+    packages.sh /opt/packages.sh
+
+%post
+    sh /opt/packages.sh
+    rm /opt/packages.sh

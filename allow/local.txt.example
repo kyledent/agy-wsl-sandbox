@@ -1,0 +1,21 @@
+# Your own additions to the allow list. ./agybox copies this file to allow/local.txt, which git ignores.
+# Changes apply at once, to running sessions too. ./agybox hosts lists what the proxy refused.
+#
+# Each host you add is somewhere the agent can send what it can read. An agent that can reach github.com with a
+# token can push your workspace to any repository the token allows, or post it as a gist.
+
+# git over HTTPS (git honors the proxy; ssh does not go through it)
+# github.com
+# codeload.github.com
+# objects.githubusercontent.com
+
+# Python packages
+# pypi.org
+# files.pythonhosted.org
+
+# npm
+# registry.npmjs.org
+
+# Ubuntu packages, if you run apt in a docker or apptainer image you build yourself
+# archive.ubuntu.com:80
+# security.ubuntu.com:80

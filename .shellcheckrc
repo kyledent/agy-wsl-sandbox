@@ -1,0 +1,3 @@
+# SC2016: commands in single quotes are meant to expand inside the sandbox, not here
+# SC2054: commas inside option values such as --no-mount hostfs,cwd are not array separators
+disable=SC2016,SC2054

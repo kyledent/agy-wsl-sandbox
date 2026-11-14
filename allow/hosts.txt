@@ -1,0 +1,27 @@
+# The hosts that agy may reach through the proxy, on port 443. Put your own in allow/local.txt, not here.
+#
+# "host" matches that host only; "*.example.com" matches its subdomains, not example.com itself; "host:8443" allows
+# that port as well. Every address a host resolves to must be public, or the proxy refuses it anyway.
+#
+# Hosts are named one by one on purpose. "*.googleapis.com" would include storage.googleapis.com, where anyone can
+# upload to a bucket of their own, so it would be a way to send your workspace out.
+
+# Sign-in: the token exchange and refresh, the account's details, and the page the browser returns to
+oauth2.googleapis.com
+accounts.google.com
+www.googleapis.com
+antigravity.google
+
+# The models
+cloudcode-pa.googleapis.com
+
+# agy's usage logging and feature flags. agy may work without it; to try, put a # in front and run ./agybox hosts
+play.googleapis.com
+
+# Google Cloud and business tiers only. Uncomment what your account uses.
+# aiplatform.googleapis.com
+# us-central1-aiplatform.googleapis.com
+# businessaicode.googleapis.com
+
+# Left out on purpose: agy's self-update (antigravity-cli-auto-updater-*.run.app, storage.googleapis.com).
+# The sandbox cannot replace agy's binary anyway; ./agybox update does that, outside.
