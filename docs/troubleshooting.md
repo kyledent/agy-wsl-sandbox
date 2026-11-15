@@ -8,7 +8,14 @@ The proxy probably refused a host. See which:
 ./agybox hosts
 ```
 
-Add the ones you trust to `allow/local.txt`. The change applies at once. To see everything a session uses, run it once
+Add the ones you trust to `allow/local.txt`. The change applies at once.
+
+Known refusals:
+
+| Host | Meaning |
+|---|---|
+| `lh3.googleusercontent.com` | agy's fetch of your account's picture. Harmless, and refused on purpose |
+| `daily-cloudcode-pa.googleapis.com` | agy's models on its daily channel. Allowed since this was found; with an older copy of `allow/hosts.txt`, agy fails with "Eligibility check failed ... loadCodeAssist". Update this repository, or add the host to `allow/local.txt` | To see everything a session uses, run it once
 with `AGYBOX_NETWORK=learn`, then `./agybox hosts all`. See [Network](network.md).
 
 If agy needs a host that is not in `allow/hosts.txt`, please report it, so that the list can be fixed for everyone.

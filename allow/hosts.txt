@@ -12,8 +12,10 @@ accounts.google.com
 www.googleapis.com
 antigravity.google
 
-# The models
+# The models. Which of the two agy uses depends on its build's release channel, not on any setting: without the one
+# it uses, agy fails after sign-in with "Eligibility check failed ... loadCodeAssist".
 cloudcode-pa.googleapis.com
+daily-cloudcode-pa.googleapis.com
 
 # agy's usage logging and feature flags. agy may work without it; to try, put a # in front and run ./agybox hosts
 play.googleapis.com
@@ -23,5 +25,8 @@ play.googleapis.com
 # us-central1-aiplatform.googleapis.com
 # businessaicode.googleapis.com
 
-# Left out on purpose: agy's self-update (antigravity-cli-auto-updater-*.run.app, storage.googleapis.com).
+# Left out on purpose: lh3.googleusercontent.com, where agy fetches your account's picture once after sign-in. Nothing
+# needs it, and googleusercontent.com serves files that anyone can upload.
+#
+# Also left out: agy's self-update (antigravity-cli-auto-updater-*.run.app, storage.googleapis.com).
 # The sandbox cannot replace agy's binary anyway; ./agybox update does that, outside.

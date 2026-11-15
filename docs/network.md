@@ -29,10 +29,11 @@ The proxy stops with `./agybox`, even if `./agybox` is killed.
 | Host | For |
 |---|---|
 | `oauth2.googleapis.com`, `accounts.google.com`, `www.googleapis.com`, `antigravity.google` | Sign-in, tokens, the account's details |
-| `cloudcode-pa.googleapis.com` | The models |
+| `cloudcode-pa.googleapis.com`, `daily-cloudcode-pa.googleapis.com` | The models. Which one depends on agy's release channel |
 | `play.googleapis.com` | agy's usage logging and feature flags |
 
-It was made from a run of agy before sign-in, and the hostnames in agy's binary. Google Cloud and business accounts may
+It was made from runs of agy before and after sign-in, and the hostnames in agy's binary. One host is refused on
+purpose: `lh3.googleusercontent.com`, from which agy fetches your account's picture once after sign-in. Nothing needs it. Google Cloud and business accounts may
 need the commented hosts in that file as well. **If agy fails after sign-in, run `./agybox hosts`.** It lists what the
 proxy refused, most often first.
 
