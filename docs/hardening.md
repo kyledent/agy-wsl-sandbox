@@ -75,12 +75,20 @@ Or keep one checkout of this repository per project, each with its own `.state`.
 sandbox, `always-proceed` is a reasonable choice, as the sandbox is the boundary, but it means a hostile instruction is
 carried out at once.
 
-**agy's own `--sandbox` may add a second layer.** agy can restrict the commands it runs, and its binary contains
-Landlock and seccomp code for that. Try `./agybox --sandbox`. It has not been tried inside this sandbox yet, and if it
-needs user namespaces, bwrap's `--disable-userns` will stop it.
+**agy runs each command in a sandbox of its own.** It starts itself again (`/opt/agy/agy`) in new namespaces for every
+shell command, so it needs user namespaces inside this sandbox, and `./agybox doctor` checks that it can make them. Its
+binary also has Landlock and seccomp code; `./agybox --sandbox` turns on its stricter terminal restrictions.
 
-**bwrap older than 0.8** (Ubuntu 22.04 has 0.6) cannot turn off user namespaces inside, and `doctor` says so. Use the
-newer package that `./agybox setup` fetches on 24.04, or the apptainer or docker backend.
+### User namespaces inside
+
+User namespaces are a common way into kernel bugs, and bwrap 0.8 and newer can turn them off inside the sandbox. That
+also stops agy's own command sandbox: every command agy runs then fails with
+`fork/exec /opt/agy/agy: no space left on device` (the kernel's answer at a namespace limit). So it is off by default.
+To turn user namespaces off anyway, for `./agybox shell` and `./agybox run` work without agy:
+
+```sh
+AGYBOX_DISABLE_USERNS=1 ./agybox shell
+```
 
 ## Tighter rules
 

@@ -31,7 +31,8 @@ it a new user, PID, IPC, UTS, cgroup and network namespace, an empty root on a t
 - `/usr`, `/etc` and the `/bin`, `/lib`, `/sbin` links, read-only: the programs and libraries of your WSL Ubuntu
 - `/proc` for the sandbox's own processes, and a minimal `/dev`
 
-It also drops every capability, and turns off user namespaces inside (`--disable-userns`).
+It also drops every capability. User namespaces stay available inside, because agy runs each command in a sandbox of
+its own that needs them (see [Hardening](hardening.md#user-namespaces-inside)).
 
 **Choose it when** you want agy to use the tools you already have in WSL, with nothing to build. A tool you install with
 `apt` outside appears inside at once. Tools in your home, such as `nvm` or `pipx` installs, do not, as your home is not

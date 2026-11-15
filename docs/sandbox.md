@@ -48,7 +48,7 @@ Files
   ok    it cannot see the Windows drives
 Processes and services
   ok    it cannot see the host's processes
-  ok    it cannot make user namespaces of its own
+  ok    agy can make its own sandbox for commands (user namespaces)
   ok    it cannot reach WSL's interop socket
   ok    it cannot reach your D-Bus session
   ok    it cannot start a Windows program (cmd.exe in the workspace)

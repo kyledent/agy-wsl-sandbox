@@ -28,6 +28,20 @@ into agy. agy waits about a minute; if it gives up, run `./agybox` again.
 If the page tries to return to agy but nothing happens, paste the code instead. The sandbox has no route for a browser
 to reach agy directly.
 
+## agy's commands fail with "no space left on device"
+
+```
+Command failed to run: fork/exec /opt/agy/agy: no space left on device
+```
+
+This is not about disk space. agy runs each command by starting itself again in new namespaces, and the kernel answers
+`ENOSPC` when a namespace cannot be made because of a limit. The usual cause was this repository: until 15 November
+2026, bwrap ran with `--disable-userns`, which sets that limit inside the sandbox. Update this
+repository (`git pull`), or check that `.env` does not set `AGYBOX_DISABLE_USERNS=1`. Then `./agybox doctor` should pass
+"agy can make its own sandbox for commands".
+
+A full `/tmp` can also report it, as `/tmp` in the sandbox is in memory: `./agybox run df -h /tmp`.
+
 ## `doctor` fails
 
 | Check | Likely cause |
@@ -39,6 +53,7 @@ to reach agy directly.
 | "it cannot start a Windows program" | **Stop and report it.** The sandbox can reach WSL's interop |
 | "it cannot type into your terminal" | The kernel allows `TIOCSTI`. On Linux 6.2 or newer: `sudo sysctl dev.tty.legacy_tiocsti=0`. On WSL, `wsl --update` brings a newer kernel |
 | "it can reach agy's sign-in service through the proxy" | No internet outside either, or (docker) the proxy's socket does not work in the container |
+| "agy can make its own sandbox for commands" | docker: its default seccomp profile refuses new user namespaces, so agy's commands will fail; use bwrap or apptainer. bwrap: `AGYBOX_DISABLE_USERNS=1` is set |
 | Any "cannot" check that fails | **Do not use that backend** until it is understood. Please report it |
 
 ## apptainer: "failed to mount binfmt_misc filesystem"

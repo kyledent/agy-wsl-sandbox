@@ -44,6 +44,10 @@ read-only, and the proxy. See [Backends](docs/backends.md) for how they differ.
 > networks, and agy 1.5.9 starts and reaches its sign-in on each. A signed-in session has been run with `bwrap` on a
 > fresh Windows 11 and Ubuntu 24.04.
 >
+> With `docker`, agy's own sandbox for commands may not work: Docker's default seccomp profile usually refuses new
+> user namespaces, which agy needs to run commands. `./agybox doctor` checks this ("agy can make its own sandbox for
+> commands"), but it has not been run on docker yet.
+>
 > The allow list may still miss a host that another agy build or account type needs. If agy fails after sign-in, run
 > `./agybox hosts` to see what the proxy refused. Run `./agybox doctor` before you rely on any backend.
 

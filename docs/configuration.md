@@ -18,6 +18,7 @@ AGYBOX_BACKEND=apptainer AGYBOX_NETWORK=learn ./agybox
 | `AGYBOX_MEMORY` | empty | A memory limit, such as `8G`. Swap is not allowed past it. When it is reached, the process that asked for more is killed, not the session |
 | `AGYBOX_CPUS` | empty | A CPU limit, such as `4` or `1.5` |
 | `AGYBOX_PIDS` | empty (`4096` with docker) | A limit on processes and threads |
+| `AGYBOX_DISABLE_USERNS` | `0` | bwrap only. `1` turns off user namespaces inside, which breaks agy's commands. See [Hardening](hardening.md#user-namespaces-inside) |
 
 For bwrap and apptainer, the limits use a systemd scope (`systemd-run --user --scope`), which needs systemd in WSL:
 `systemd=true` under `[boot]` in `/etc/wsl.conf`, the default on Ubuntu 24.04. Docker uses its own.

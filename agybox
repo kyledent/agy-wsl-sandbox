@@ -270,8 +270,12 @@ sandbox_cmd_bwrap() {
     local kv d
     SANDBOX=("${LIMIT[@]}" "$BWRAP" --unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try
         --die-with-parent --hostname agybox --cap-drop ALL --clearenv)
-    # No further user namespaces inside, which are a common way into kernel bugs. bwrap 0.8 and newer.
-    if bwrap_disables_userns; then SANDBOX+=(--disable-userns); fi
+    # agy runs each command in a sandbox of its own, which needs user namespaces, so they stay on unless asked.
+    # With them off, every command agy runs fails with "fork/exec /opt/agy/agy: no space left on device".
+    if [ "${AGYBOX_DISABLE_USERNS:-0}" = 1 ]; then
+        bwrap_disables_userns || die "AGYBOX_DISABLE_USERNS=1 needs bwrap 0.8 or newer"
+        SANDBOX+=(--disable-userns)
+    fi
     if [ "$NETWORK" = open ]; then SANDBOX+=(--share-net); else SANDBOX+=(--unshare-net); fi
     # The system's programs and libraries. Ubuntu keeps /bin, /lib and /sbin in /usr.
     SANDBOX+=(--ro-bind /usr /usr)
@@ -476,12 +480,13 @@ cmd_doctor() {
 
     echo "Processes and services"
     expect_refused "it cannot see the host's processes" box_sh 'grep -qx systemd /proc/1/comm'
-    if [ "$BACKEND" = bwrap ]; then
-        if bwrap_disables_userns; then
-            expect_refused "it cannot make user namespaces of its own" box_sh 'unshare --user true'
-        else
-            echo "  skip  user namespaces inside: this bwrap is older than 0.8. See docs/hardening.md"
-        fi
+    # agy runs each command in a sandbox of its own, in new namespaces. Where the kernel refuses them, every command
+    # agy runs fails, with "no space left on device" (ENOSPC is what the kernel returns at a namespace limit).
+    if [ "$BACKEND" = bwrap ] && [ "${AGYBOX_DISABLE_USERNS:-0}" = 1 ]; then
+        expect_refused "it cannot make user namespaces (AGYBOX_DISABLE_USERNS=1: agy's commands will fail)" \
+            box_sh 'unshare --user true'
+    else
+        expect_ok "agy can make its own sandbox for commands (user namespaces)" box_sh 'unshare --user --map-root-user true'
     fi
     expect_refused "it cannot reach WSL's interop socket" box_sh 'ls /run/WSL/ | grep -q interop'
     expect_refused "it cannot reach your D-Bus session" box_sh "test -S /run/user/$(id -u)/bus"
