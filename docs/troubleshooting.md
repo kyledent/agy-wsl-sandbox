@@ -15,6 +15,8 @@ Known refusals:
 | Host | Meaning |
 |---|---|
 | `lh3.googleusercontent.com` | agy's fetch of your account's picture. Harmless, and refused on purpose |
+| `aicode.googleapis.com`, `jetski-webchannel.googleapis.com`, `www.gstatic.com` | Your account's settings, Remote Control's relay and the plugin marketplace. Allowed since 15 November 2026: update this repository |
+| A host your project uses, such as an API | Your project's need, not agy's: add it to `allow/local.txt` |
 | `daily-cloudcode-pa.googleapis.com` | agy's models on its daily channel. Allowed since this was found; with an older copy of `allow/hosts.txt`, agy fails with "Eligibility check failed ... loadCodeAssist". Update this repository, or add the host to `allow/local.txt` | To see everything a session uses, run it once
 with `AGYBOX_NETWORK=learn`, then `./agybox hosts all`. See [Network](network.md).
 

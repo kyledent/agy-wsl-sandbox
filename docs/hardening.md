@@ -79,6 +79,10 @@ carried out at once.
 shell command, so it needs user namespaces inside this sandbox, and `./agybox doctor` checks that it can make them. Its
 binary also has Landlock and seccomp code; `./agybox --sandbox` turns on its stricter terminal restrictions.
 
+When agy's own sandbox gets in a command's way, such as for tests, the model may ask to run it with
+`BypassSandbox: true`, and agy asks you first. That leaves agy's sandbox only: the command still runs inside this one,
+with the same files, network and limits.
+
 ### User namespaces inside
 
 User namespaces are a common way into kernel bugs, and bwrap 0.8 and newer can turn them off inside the sandbox. That

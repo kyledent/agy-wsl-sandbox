@@ -17,6 +17,18 @@ antigravity.google
 cloudcode-pa.googleapis.com
 daily-cloudcode-pa.googleapis.com
 
+# Your account's settings and details (aicode.googleapis.com/UserSettings, /UserInfo). Without it agy retries every
+# 15-20 s, and Remote Control stays off, as its on/off switch is one of those settings.
+aicode.googleapis.com
+
+# Remote Control's relay, which Google's servers name at run time. agy only connects to it when you turn Remote Control
+# on. Then a browser signed in to your account can drive agy, inside this sandbox.
+jetski-webchannel.googleapis.com
+
+# The plugin marketplace's lists (www.gstatic.com/antigravity/plugins/marketplace.json). Google's static files; nobody
+# else can upload there.
+www.gstatic.com
+
 # agy's usage logging and feature flags. agy may work without it; to try, put a # in front and run ./agybox hosts
 play.googleapis.com
 

@@ -30,6 +30,9 @@ The proxy stops with `./agybox`, even if `./agybox` is killed.
 |---|---|
 | `oauth2.googleapis.com`, `accounts.google.com`, `www.googleapis.com`, `antigravity.google` | Sign-in, tokens, the account's details |
 | `cloudcode-pa.googleapis.com`, `daily-cloudcode-pa.googleapis.com` | The models. Which one depends on agy's release channel |
+| `aicode.googleapis.com` | Your account's settings and details, including whether Remote Control is on |
+| `jetski-webchannel.googleapis.com` | Remote Control's relay, used only when you turn Remote Control on |
+| `www.gstatic.com` | The plugin marketplace's lists |
 | `play.googleapis.com` | agy's usage logging and feature flags |
 
 It was made from runs of agy before and after sign-in, and the hostnames in agy's binary. One host is refused on
@@ -89,6 +92,18 @@ service on Windows' localhost, such as a database, a development server or a des
 ```sh
 AGYBOX_NETWORK=open ./agybox
 ```
+
+## Remote Control
+
+agy's [Remote Control](https://antigravity.google/docs/remote-control/) lets a browser signed in to your account drive
+agy. agy connects out to Google's relay, `jetski-webchannel.googleapis.com`, which the allow list includes; nothing
+connects in. The browser then drives agy inside the sandbox, with the sandbox's limits.
+
+agy also has WebRTC code, for a direct link between the browser and agy, which needs UDP: Google's STUN server
+`stun.l.google.com:19302` and relay servers it is told about at run time. The proxy carries TCP only, so that direct
+link cannot form in `proxy` or `learn` mode. Whether agy then keeps to the relay, as its code suggests it can, has not
+been tested yet. If Remote Control connects but then fails, try it once with `AGYBOX_NETWORK=open`, and please report
+what you find.
 
 ## What does not go through the proxy
 
